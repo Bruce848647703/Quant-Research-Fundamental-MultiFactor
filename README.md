@@ -170,7 +170,7 @@ python scripts/run_backtest.py
 # 3. 权重优化方法对比（ICIR加权/约束优化/ML walk-forward）
 python scripts/run_weight_optimization.py
 
-# 4. 输出当前应持仓组合
+# 4. 输出当前应持仓组合（默认ML集成打分，加 --equal-weight 切换等权）
 python scripts/show_holdings.py
 
 # 5. 运行单元测试
