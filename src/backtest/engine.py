@@ -1,6 +1,6 @@
 """
-多因子月度轮动回测引擎（向量化实现）
-支持Top-N组合回测与分层（分位数）回测
+Multi-factor monthly-rotation backtest engine (vectorized implementation)
+Supports Top-N portfolio backtest and quantile-group backtest
 """
 import numpy as np
 import pandas as pd
@@ -8,7 +8,7 @@ from typing import Dict, List
 
 
 class MultiFactorEngine:
-    """多因子回测引擎"""
+    """Multi-factor backtest engine"""
     
     def __init__(self, config: Dict):
         self.config = config
@@ -18,21 +18,22 @@ class MultiFactorEngine:
         self.slippage = self.bt_config.get("slippage", 0.001)
         self.top_n = self.bt_config.get("top_n", 30)
         self.num_groups = self.bt_config.get("num_groups", 5)
-        # 单边换手对应的交易成本（买入+卖出双边佣金/滑点，卖出印花税）
+        # transaction cost per unit of one-side turnover
+        # (commission/slippage on both sides, stamp tax on sell)
         self.turnover_cost = 2 * (self.commission + self.slippage) + self.stamp_tax
     
     def get_rebalance_dates(self, trading_dates: pd.DatetimeIndex,
                             start_date: str = None, end_date: str = None) -> List[pd.Timestamp]:
         """
-        获取每月最后一个交易日作为调仓日
+        Get the last trading day of each month as rebalance dates
         
         Args:
-            trading_dates: 全部交易日序列
-            start_date: 起始日期 'YYYYMMDD'（可选）
-            end_date: 结束日期 'YYYYMMDD'（可选）
+            trading_dates: full trading-day series
+            start_date: start date 'YYYYMMDD' (optional)
+            end_date: end date 'YYYYMMDD' (optional)
             
         Returns:
-            调仓日期列表
+            list of rebalance dates
         """
         dates = pd.DatetimeIndex(trading_dates)
         if start_date:
@@ -47,16 +48,17 @@ class MultiFactorEngine:
     def compute_period_returns(self, ret_wide: pd.DataFrame,
                                rebalance_dates: List[pd.Timestamp]) -> pd.DataFrame:
         """
-        计算相邻调仓日之间的区间收益率
+        Compute returns between consecutive rebalance dates
         
         Args:
-            ret_wide: 日收益率宽表（index=交易日, columns=股票代码）
-            rebalance_dates: 调仓日期列表
+            ret_wide: daily return wide table (index=trading day, columns=stock code)
+            rebalance_dates: list of rebalance dates
             
         Returns:
-            区间收益宽表（index=调仓日[:-1], 每行表示该行日期到下一调仓日的收益）
+            period return wide table (index=rebalance dates[:-1]; each row is the
+            return from that date to the next rebalance date)
         """
-        # 停牌日按0收益处理
+        # treat suspended days as zero return
         cumret = (1 + ret_wide.fillna(0.0)).cumprod()
         
         period_rets = []
@@ -68,7 +70,7 @@ class MultiFactorEngine:
         return pd.DataFrame(period_rets, index=rebalance_dates[:-1])
     
     def _turnover(self, old_holdings: set, new_holdings: set) -> float:
-        """计算换手率（换出股票数 / 原持仓数）"""
+        """Compute turnover (number of stocks sold / previous holdings count)"""
         if not old_holdings:
             return 1.0
         changed = len(old_holdings - new_holdings)
@@ -78,17 +80,17 @@ class MultiFactorEngine:
                       rebalance_dates: List[pd.Timestamp],
                       inv_vol_panel: pd.DataFrame = None) -> Dict:
         """
-        Top-N组合回测
+        Top-N portfolio backtest
         
         Args:
-            scores: 合成得分宽表（index=调仓日, columns=股票代码）
-            period_ret: 区间收益宽表
-            rebalance_dates: 完整调仓日期列表（比period_ret多一个期末日期）
-            inv_vol_panel: 日频波动率宽表（可选），传入时组合内按逆波动率配权，
-                           否则等权
+            scores: combined score wide table (index=rebalance date, columns=stock code)
+            period_ret: period return wide table
+            rebalance_dates: full rebalance date list (one more date than period_ret)
+            inv_vol_panel: daily volatility wide table (optional); when provided,
+                           holdings are weighted by inverse volatility, otherwise equal weight
             
         Returns:
-            结果字典: nav / holdings / turnover
+            result dict: nav / holdings / turnover
         """
         nav_values = [1.0]
         holdings_history = []
@@ -96,7 +98,7 @@ class MultiFactorEngine:
         
         old_holdings = set()
         
-        # 波动率在调仓日采样并前向填充
+        # sample volatility at rebalance dates and forward-fill
         vol_at_rb = None
         if inv_vol_panel is not None:
             rb_index = pd.DatetimeIndex(rebalance_dates)
@@ -104,10 +106,10 @@ class MultiFactorEngine:
                 inv_vol_panel.index.union(rb_index)).ffill()
         
         for t in period_ret.index:
-            # 当期选股：得分最高的top_n只
+            # stock selection for the period: top_n stocks with the highest scores
             score_t = scores.loc[t].dropna()
             if score_t.empty:
-                # 得分不可用（如机器学习训练期不足）：沿用旧持仓，不产生交易成本
+                # scores unavailable (e.g. ML training warm-up): keep old holdings, no cost
                 if old_holdings:
                     ret_t = period_ret.loc[t, list(old_holdings)].mean()
                     nav_values.append(nav_values[-1] * (1 + ret_t))
@@ -123,7 +125,7 @@ class MultiFactorEngine:
             turnover = self._turnover(old_holdings, new_holdings)
             holding_list = list(new_holdings)
             if vol_at_rb is not None:
-                # 逆波动率配权：权重 ∝ 1/近期波动率
+                # inverse-volatility weighting: weight proportional to 1/recent volatility
                 vols = vol_at_rb.loc[t, holding_list].clip(lower=1e-4)
                 wts = (1.0 / vols)
                 wts = wts / wts.sum()
@@ -137,7 +139,7 @@ class MultiFactorEngine:
             turnover_history.append(turnover)
             old_holdings = new_holdings
         
-        # 净值对齐全部调仓日: nav[t_k]表示第k-1期结束时的净值
+        # align NAV to all rebalance dates: nav[t_k] is the NAV at the end of period k-1
         nav = pd.Series(nav_values, index=rebalance_dates)
         
         return {
@@ -149,16 +151,16 @@ class MultiFactorEngine:
     def run_groups(self, scores: pd.DataFrame, period_ret: pd.DataFrame,
                    rebalance_dates: List[pd.Timestamp], num_groups: int = None) -> Dict[str, pd.Series]:
         """
-        分层回测：按得分分为num_groups组，各组等权
+        Quantile-group backtest: split stocks into num_groups by score, equal weight within each group
         
         Args:
-            scores: 合成得分宽表
-            period_ret: 区间收益宽表
-            rebalance_dates: 完整调仓日期列表
-            num_groups: 分组数量
+            scores: combined score wide table
+            period_ret: period return wide table
+            rebalance_dates: full rebalance date list
+            num_groups: number of groups
             
         Returns:
-            {组别名: 净值序列}，第1组得分最高
+            {group alias: NAV series}; group 1 has the highest scores
         """
         num_groups = num_groups or self.num_groups
         
@@ -168,14 +170,14 @@ class MultiFactorEngine:
         for t in period_ret.index:
             score_t = scores.loc[t].dropna()
             if score_t.empty:
-                # 得分不可用：各组沿用旧持仓
+                # scores unavailable: keep old holdings in each group
                 for g in range(1, num_groups + 1):
                     holdings = old_groups.get(g, set())
                     ret_t = period_ret.loc[t, list(holdings)].mean() if holdings else 0.0
                     group_navs[g].append(group_navs[g][-1] * (1 + ret_t))
                 continue
             
-            # 按得分排序后均分，第1组为得分最高组
+            # sort by score and split evenly; group 1 has the highest scores
             ranked = score_t.sort_values(ascending=False)
             group_lists = np.array_split(ranked.index.values, num_groups)
             

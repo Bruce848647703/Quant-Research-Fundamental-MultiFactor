@@ -1,5 +1,5 @@
 """
-权重优化模块单元测试
+Unit tests for the factor weight optimization module
 """
 import sys
 import os
@@ -18,7 +18,7 @@ from src.factors.weight_optimizer import (
 
 @pytest.fixture
 def sample_ic_table():
-    """构造IC序列表: factor_a持续为正且稳定, factor_b持续为负"""
+    """Build an IC series table: factor_a is persistently positive and stable, factor_b is persistently negative"""
     dates = pd.date_range("2023-01-31", periods=24, freq="M")
     rng = np.random.default_rng(42)
     return pd.DataFrame({
@@ -28,34 +28,34 @@ def sample_ic_table():
 
 
 def test_rolling_icir_weights(sample_ic_table):
-    """ICIR加权应给稳定正IC因子更高权重，负IC因子权重为0"""
+    """ICIR weighting should give a higher weight to the stable positive-IC factor and zero weight to the negative-IC factor"""
     weights = rolling_icir_weights(sample_ic_table, window=12, min_periods=6)
     
-    # 前几期样本不足应为NaN
+    # Early rows lack enough samples and should be NaN
     assert weights.iloc[0].isna().all()
-    # 后期有效行: factor_a权重应为1, factor_b为0
+    # For later valid rows: factor_a weight should be 1, factor_b should be 0
     last = weights.iloc[-1]
     assert last["factor_a"] == pytest.approx(1.0, abs=1e-6)
     assert last["factor_b"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_max_icir_weights(sample_ic_table):
-    """最大化ICIR: 权重和为1且在[0,1]内，倾向正IC因子"""
+    """Max-ICIR: weights sum to 1 within [0,1] and favor the positive-IC factor"""
     w = max_icir_weights(sample_ic_table)
     
     assert w is not None
     assert w.sum() == pytest.approx(1.0, abs=1e-4)
     assert (w >= -1e-8).all() and (w <= 1 + 1e-8).all()
-    assert w[0] > w[1]  # 正IC因子权重更高
+    assert w[0] > w[1]  # positive-IC factor gets a higher weight
 
 
 def test_max_icir_weights_insufficient_data(sample_ic_table):
-    """历史不足时应返回None"""
+    """Should return None when history is insufficient"""
     assert max_icir_weights(sample_ic_table.iloc[:5]) is None
 
 
 def test_ml_walk_forward_no_lookahead():
-    """walk-forward: 训练期不足时得分应为NaN，且得分不依赖未来数据"""
+    """Walk-forward: scores should be NaN during the warm-up period, and never depend on future data"""
     dates = pd.date_range("2023-01-31", periods=12, freq="M")
     stocks = [f"S{i}" for i in range(20)]
     rng = np.random.default_rng(0)
@@ -71,16 +71,16 @@ def test_ml_walk_forward_no_lookahead():
                                  min_train_periods=8, factor_names=["f1"])
     scores = scorer.fit_predict(factor_panels, period_ret, rebalance_dates)
     
-    # 前8期训练不足应为NaN
+    # The first 8 periods lack training data and should be NaN
     assert scores.iloc[:8].isna().all().all()
-    # 后期应有有效得分
+    # Later periods should have valid scores
     assert scores.iloc[-1].notna().any()
-    # 得分形状与股票数一致
+    # Score shape matches the number of stocks
     assert scores.shape[1] == len(stocks)
 
 
 def test_ewma_icir_weights(sample_ic_table):
-    """EWMA-ICIR加权: 正IC因子权重为1，负IC因子为0，行和为1"""
+    """EWMA-ICIR weighting: positive-IC factor weight 1, negative-IC factor 0, rows sum to 1"""
     weights = ewma_icir_weights(sample_ic_table, halflife=6, min_periods=6)
     
     assert weights.iloc[0].isna().all()
@@ -90,35 +90,35 @@ def test_ewma_icir_weights(sample_ic_table):
 
 
 def test_orthogonalize_factors():
-    """正交化: 残差因子与前序因子截面相关应接近0，且保持标准化"""
+    """Orthogonalization: residual factors should be nearly uncorrelated with preceding factors, and stay standardized"""
     dates = pd.date_range("2023-01-31", periods=4, freq="M")
     stocks = [f"S{i}" for i in range(50)]
     rng = np.random.default_rng(1)
     
     base = pd.DataFrame(rng.normal(size=(4, 50)), index=dates, columns=stocks)
-    # f2 = 0.8*f1 + 噪声，与f1强共线
+    # f2 = 0.8*f1 + noise, strongly collinear with f1
     noise = pd.DataFrame(rng.normal(0, 0.5, size=(4, 50)), index=dates, columns=stocks)
     factor_panels = {"f1": base, "f2": base * 0.8 + noise}
     
     ortho = orthogonalize_factors(factor_panels, ["f1", "f2"], list(dates))
     
-    # f1本身不变（仅标准化）
+    # f1 itself is unchanged (standardization only)
     assert ortho["f1"].shape == base.shape
-    # f2正交化后与f1的截面相关应接近0
+    # Cross-sectional correlation between orthogonalized f2 and f1 should be ~0
     corr = ortho["f1"].loc[dates[-1]].corr(ortho["f2"].loc[dates[-1]])
     assert abs(corr) < 1e-6
-    # 残差应重新标准化（均值≈0，标准差≈1）
+    # Residuals should be re-standardized (mean ~0, std ~1)
     resid = ortho["f2"].loc[dates[-1]].dropna()
     assert abs(resid.mean()) < 1e-6
     assert resid.std() == pytest.approx(1.0, abs=0.1)
 
 
 def test_factor_long_short_returns():
-    """多空收益: 因子值与下期收益同向时，多空收益应为正"""
+    """Long-short returns: should be positive when factor values are aligned with next-period returns"""
     dates = pd.date_range("2023-01-31", periods=6, freq="M")
     stocks = [f"S{i}" for i in range(30)]
     
-    # 因子值固定排序，下期收益与因子值正相关
+    # Fixed factor ordering; next-period returns are positively correlated with factor values
     factor = pd.DataFrame(
         np.tile(np.arange(30, dtype=float), (6, 1)), index=dates, columns=stocks)
     rets = np.tile(np.arange(30, dtype=float) / 300, (5, 1))
@@ -127,15 +127,15 @@ def test_factor_long_short_returns():
     ls = factor_long_short_returns({"f1": factor}, period_ret, list(dates),
                                    quantile=0.2)
     assert ls.shape == (5, 1)
-    # 高分组收益高于低分组，多空收益应为正
+    # The high-score group outperforms the low-score group, so long-short returns are positive
     assert (ls["f1"] > 0).all()
 
 
 def test_rolling_mv_weights():
-    """均值-方差加权: 有效行权重和为1且非负；样本不足为NaN"""
+    """Mean-variance weighting: valid rows sum to 1 and are non-negative; insufficient samples yield NaN"""
     rng = np.random.default_rng(7)
     dates = pd.date_range("2023-01-31", periods=36, freq="M")
-    # 两个因子的多空收益: a持续为正，b持续为负
+    # Long-short returns of two factors: a persistently positive, b persistently negative
     ls = pd.DataFrame({
         "a": 0.02 + rng.normal(0, 0.03, 36),
         "b": -0.02 + rng.normal(0, 0.03, 36),
@@ -143,9 +143,9 @@ def test_rolling_mv_weights():
     
     weights = rolling_mv_weights(ls, window=24, min_periods=18)
     
-    # 前期样本不足应为NaN
+    # Early rows lack samples and should be NaN
     assert weights.iloc[0].isna().all()
-    # 有效行: 权重和为1、非负，且正收益因子权重更高
+    # Valid rows: weights sum to 1, non-negative, and the positive-return factor gets a higher weight
     valid = weights.dropna(how="all")
     assert len(valid) > 0
     for _, row in valid.iterrows():

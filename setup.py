@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="quant-research-fundamental-multifactor",
     version="0.1.0",
-    description="A股量化研究项目 - 基本面多因子月度轮动回测",
+    description="China A-share quant research - fundamental multi-factor monthly rotation backtest",
     author="Bruce",
     packages=find_packages(where="src"),
     package_dir={"": "src"},

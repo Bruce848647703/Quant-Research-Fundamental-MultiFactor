@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-最新持仓输出脚本
-默认使用ML集成打分（扩展窗口 Ridge+GBDT walk-forward，向等权得分收缩），
-输出当前应持有的股票组合；--equal-weight 可切换为原始等权多因子打分
+Latest holdings output script
+Uses ML ensemble scoring by default (expanding-window Ridge+GBDT walk-forward,
+shrunk toward the equal-weight score) and outputs the portfolio to hold now.
+Use --equal-weight to switch to the plain equal-weight multi-factor score.
 """
 import sys
 import os
@@ -25,20 +26,21 @@ def ml_ensemble_scores(factor_panels: dict, period_ret: pd.DataFrame,
                        eval_dates: list, factor_names: list, config: dict,
                        scores_equal: pd.DataFrame) -> pd.DataFrame:
     """
-    ML集成打分（walk-forward，严格无未来函数）
-    扩展窗口训练 Ridge+GBDT 预测下期收益，截面标准化后平均，
-    再按 weight_optimization.ml_shrinkage 比例向等权得分收缩降方差
+    ML ensemble scoring (walk-forward, strictly no lookahead)
+    Train Ridge+GBDT on an expanding window to predict next-period returns,
+    average after cross-section normalization, then shrink toward the
+    equal-weight score by weight_optimization.ml_shrinkage to reduce variance.
     
     Args:
-        factor_panels: 因子面板dict
-        period_ret: 区间收益宽表（提供历史训练标签）
-        eval_dates: 需要输出得分的日期列表
-        factor_names: 因子名列表
-        config: 全局配置
-        scores_equal: 等权合成得分（收缩基准）
+        factor_panels: dict of factor panels
+        period_ret: period return wide table (provides historical training labels)
+        eval_dates: list of dates to output scores for
+        factor_names: list of factor names
+        config: global config
+        scores_equal: equal-weight combined score (shrinkage target)
         
     Returns:
-        得分宽表（index=eval_dates, columns=股票代码）
+        score wide table (index=eval_dates, columns=stock code)
     """
     wo_config = config.get("weight_optimization", {})
     min_train = wo_config.get("ml_min_train_periods", 24)
@@ -69,7 +71,7 @@ def ml_ensemble_scores(factor_panels: dict, period_ret: pd.DataFrame,
 
 def build_holdings_table(scores: pd.DataFrame, date: pd.Timestamp,
                          name_map: dict) -> pd.DataFrame:
-    """根据单日得分生成持仓表"""
+    """Build a holdings table from single-date scores"""
     score_t = scores.loc[date].dropna().sort_values(ascending=False)
     table = pd.DataFrame({
         "stock_code": score_t.index,
@@ -81,22 +83,23 @@ def build_holdings_table(scores: pd.DataFrame, date: pd.Timestamp,
 
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description="最新持仓输出")
+    """Main function"""
+    parser = argparse.ArgumentParser(description="Latest holdings output")
     parser.add_argument("--equal-weight", action="store_true",
-                        help="使用等权多因子打分（默认: ML集成）")
+                        help="use equal-weight multi-factor scoring (default: ML ensemble)")
     args = parser.parse_args()
     
-    method = "等权多因子" if args.equal_weight else "ML集成(扩展窗口Ridge+GBDT, 收缩30%)"
-    print("基本面多因子 - 最新持仓计算")
-    print(f"打分方式: {method}")
+    method = "Equal-Weight Multi-Factor" if args.equal_weight else \
+        "ML Ensemble (expanding-window Ridge+GBDT, 30% shrinkage)"
+    print("Fundamental Multi-Factor - Latest Holdings")
+    print(f"Scoring method: {method}")
     print("=" * 60)
     
     config = load_config()
     data_config = config["data"]
     results_config = config["results"]
     
-    # 加载数据
+    # load data
     loader = DataLoader(
         raw_dir=data_config["raw_dir"],
         processed_dir=data_config["processed_dir"]
@@ -108,11 +111,11 @@ def main():
     valuation, financial = data["valuation"], data["financial"]
     panel = loader.prepare_panel_data(valuation)
     
-    # 股票名称映射
+    # stock name mapping ("品种代码"/"品种名称" are raw Chinese column names from the API)
     stocks_df = loader.get_hs300_stocks()
     name_map = dict(zip(stocks_df["品种代码"], stocks_df["品种名称"]))
     
-    # 计算因子面板
+    # compute factor panels
     trading_dates = panel["ret"].index
     factor_panels = compute_factor_panels(config, panel, financial)
     factor_names = list(config["factor"]["weights"].keys())
@@ -121,7 +124,8 @@ def main():
     engine = MultiFactorEngine(config)
     top_n = config["backtest"]["top_n"]
     
-    # 1. 最近一次正式调仓日（月末）的持仓 —— 当前实际应持有
+    # 1. holdings at the most recent official rebalance date (month end)
+    #    -- what should actually be held now
     rebalance_dates = engine.get_rebalance_dates(
         trading_dates,
         start_date=data_config["start_date"],
@@ -129,7 +133,7 @@ def main():
     )
     last_rebalance = rebalance_dates[-1]
     
-    # 等权得分（ML集成的收缩基准 / 或作为默认打分）
+    # equal-weight score (shrinkage target for ML ensemble / or the default scorer)
     combiner = MultiFactorCombiner(config["factor"]["weights"])
     eval_dates = sorted({last_rebalance, latest_date})
     scores_equal = combiner.combine(factor_panels, eval_dates)
@@ -137,7 +141,7 @@ def main():
     if args.equal_weight:
         scores_rebal, scores_latest = scores_equal, scores_equal
     else:
-        print("训练 ML集成（扩展窗口 walk-forward）...")
+        print("Training ML ensemble (expanding-window walk-forward)...")
         period_ret = engine.compute_period_returns(panel["ret"], rebalance_dates)
         scores_all = ml_ensemble_scores(
             factor_panels, period_ret, eval_dates,
@@ -147,32 +151,32 @@ def main():
     
     current = build_holdings_table(scores_rebal, last_rebalance, name_map)
     
-    print(f"\n【当前持仓】最近调仓日: {last_rebalance.date()}, "
-          f"持有至下一个月末调仓")
+    print(f"\n[Current Holdings] last rebalance: {last_rebalance.date()}, "
+          f"hold until the next month-end rebalance")
     print(current.head(top_n).to_string(index=False))
     
-    # 2. 若按最新数据立即调仓的假设持仓（对比参考）
+    # 2. hypothetical holdings if rebalancing immediately with the latest data
     if latest_date != last_rebalance:
         hypothetical = build_holdings_table(scores_latest, latest_date, name_map)
         
-        print(f"\n【参考】若按最新数据({latest_date.date()})立即调仓:")
+        print(f"\n[Reference] if rebalancing immediately with the latest data ({latest_date.date()}):")
         print(hypothetical.head(top_n).to_string(index=False))
         
         cur_set = set(current.head(top_n)["stock_code"])
         hyp_set = set(hypothetical.head(top_n)["stock_code"])
-        print(f"\n与当前持仓相比: 新进 {len(hyp_set - cur_set)} 只, "
-              f"剔除 {len(cur_set - hyp_set)} 只")
+        print(f"\nvs current holdings: {len(hyp_set - cur_set)} added, "
+              f"{len(cur_set - hyp_set)} removed")
         if hyp_set - cur_set:
-            print(f"新进: {sorted(hyp_set - cur_set)}")
+            print(f"Added: {sorted(hyp_set - cur_set)}")
         if cur_set - hyp_set:
-            print(f"剔除: {sorted(cur_set - hyp_set)}")
+            print(f"Removed: {sorted(cur_set - hyp_set)}")
     
-    # 保存结果
+    # save results
     ensure_dir(results_config["report_dir"])
     out_path = os.path.join(results_config["report_dir"], "holdings_latest.csv")
     current.head(top_n).to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"\n当前持仓已保存至: {out_path}")
-    print("\n提示: 以上仅为因子模型输出，不构成投资建议")
+    print(f"\nCurrent holdings saved to: {out_path}")
+    print("\nNote: this is only the output of a factor model, not investment advice")
 
 
 if __name__ == "__main__":

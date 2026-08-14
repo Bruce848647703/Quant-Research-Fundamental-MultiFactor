@@ -1,13 +1,13 @@
 """
-因子权重优化模块
-1. ICIR动态加权: 权重正比于滚动ICIR，自动降权无效因子
-2. EWMA-IC加权: 指数衰减的ICIR加权，近期信号权重更高
-3. 最大化组合ICIR: 基于因子IC协方差矩阵的约束优化
-4. 均值-方差加权: 基于因子多空组合真实收益 + Ledoit-Wolf收缩协方差，最大化夏普
-5. 因子正交化: 逐层回归取残差，消除因子共线后再加权
-6. 机器学习walk-forward: Ridge回归 / 直方图GBDT 滚动或扩展窗口训练直接预测下期收益
+Factor weight optimization module
+1. Rolling ICIR weighting: weight proportional to rolling ICIR, automatically down-weights ineffective factors
+2. EWMA-IC weighting: exponentially decayed ICIR weighting, more weight on recent signals
+3. Max portfolio ICIR: constrained optimization based on the IC covariance matrix
+4. Mean-variance weighting: factor long-short portfolio returns + Ledoit-Wolf shrunk covariance, maximize Sharpe
+5. Factor orthogonalization: sequential regression residuals to remove collinearity before weighting
+6. ML walk-forward: Ridge / histogram GBDT trained on rolling or expanding windows to predict next-period returns
 
-所有方法严格使用时点之前的信息（walk-forward），避免未来函数
+All methods strictly use information available at each point in time (walk-forward), no lookahead bias
 """
 import numpy as np
 import pandas as pd
@@ -24,15 +24,15 @@ from .base import preprocess_cross_section
 def rolling_icir_weights(ic_table: pd.DataFrame, window: int = 12,
                          min_periods: int = 6) -> pd.DataFrame:
     """
-    滚动ICIR加权：权重 = max(滚动ICIR, 0)，归一化到和为1
+    Rolling ICIR weighting: weight = max(rolling ICIR, 0), normalized to sum to 1
     
     Args:
-        ic_table: IC序列表（index=调仓日, columns=因子名）
-        window: 滚动窗口（月）
-        min_periods: 最少观测期数
+        ic_table: IC series table (index=rebalance date, columns=factor name)
+        window: rolling window (months)
+        min_periods: minimum number of observations
         
     Returns:
-        权重表（与ic_table同索引）
+        weight table (same index as ic_table)
     """
     ic_mean = ic_table.rolling(window, min_periods=min_periods).mean()
     ic_std = ic_table.rolling(window, min_periods=min_periods).std()
@@ -42,23 +42,23 @@ def rolling_icir_weights(ic_table: pd.DataFrame, window: int = 12,
     row_sum = weights.sum(axis=1)
     weights = weights.div(row_sum, axis=0)
     
-    # 无有效权重的行填NaN，由调用方回退为等权
+    # rows with no valid weights are filled with NaN; caller falls back to equal weight
     weights[row_sum == 0] = np.nan
     return weights
 
 
 def max_icir_weights(ic_history: pd.DataFrame, shrinkage: float = 0.5) -> Optional[np.ndarray]:
     """
-    给定历史IC序列，求最大化组合ICIR (mu'w / sqrt(w'Cov w)) 的权重
-    约束: 权重和为1, 各权重在[0,1]之间
-    协方差矩阵向单位阵收缩以增强小样本下的稳定性
+    Given IC history, solve for weights maximizing portfolio ICIR (mu'w / sqrt(w'Cov w)).
+    Constraints: weights sum to 1, each weight in [0, 1].
+    The covariance matrix is shrunk toward the identity matrix for small-sample stability.
     
     Args:
-        ic_history: 历史IC表（每行一期, 每列一个因子）
-        shrinkage: 协方差收缩系数 (0~1)
+        ic_history: historical IC table (one row per period, one column per factor)
+        shrinkage: covariance shrinkage coefficient (0~1)
         
     Returns:
-        权重数组；历史数据不足时返回None
+        weight array; None if history is insufficient
     """
     ic_history = ic_history.dropna(how="all")
     if len(ic_history) < 12:
@@ -67,7 +67,7 @@ def max_icir_weights(ic_history: pd.DataFrame, shrinkage: float = 0.5) -> Option
     mu = ic_history.mean().values
     cov = ic_history.cov().values
     
-    # Ledoit式收缩: Cov_reg = (1-s)*Cov + s*diag均值*I
+    # Ledoit-style shrinkage: Cov_reg = (1-s)*Cov + s*mean(diag)*I
     diag_mean = np.trace(cov) / len(cov)
     cov_reg = (1 - shrinkage) * cov + shrinkage * diag_mean * np.eye(len(mu))
     
@@ -95,16 +95,16 @@ def max_icir_weights(ic_history: pd.DataFrame, shrinkage: float = 0.5) -> Option
 def rolling_max_icir_weights(ic_table: pd.DataFrame, window: int = 36,
                              min_periods: int = 24, shrinkage: float = 0.5) -> pd.DataFrame:
     """
-    滚动窗口内最大化组合ICIR，逐期求解权重
+    Maximize portfolio ICIR within a rolling window, solved period by period
     
     Args:
-        ic_table: IC序列表
-        window: 滚动窗口（月）
-        min_periods: 最少观测期数
-        shrinkage: 协方差收缩系数
+        ic_table: IC series table
+        window: rolling window (months)
+        min_periods: minimum number of observations
+        shrinkage: covariance shrinkage coefficient
         
     Returns:
-        权重表（index=ic_table索引, columns=因子名）
+        weight table (index=ic_table index, columns=factor name)
     """
     records = []
     for i in range(len(ic_table)):
@@ -121,16 +121,17 @@ def rolling_max_icir_weights(ic_table: pd.DataFrame, window: int = 36,
 def ewma_icir_weights(ic_table: pd.DataFrame, halflife: int = 6,
                       min_periods: int = 6) -> pd.DataFrame:
     """
-    EWMA-ICIR加权：指数衰减（半衰期halflife个月）估计IC均值与波动，
-    权重 = max(EWMA-ICIR, 0) 归一化。相比等权窗口，近期信号权重更高
+    EWMA-ICIR weighting: estimate IC mean and volatility with exponential decay
+    (half-life of halflife months); weight = max(EWMA-ICIR, 0), normalized.
+    Compared to an equal-weight window, recent signals get higher weight.
     
     Args:
-        ic_table: IC序列表（index=调仓日, columns=因子名）
-        halflife: 指数衰减半衰期（月）
-        min_periods: 最少观测期数
+        ic_table: IC series table (index=rebalance date, columns=factor name)
+        halflife: exponential decay half-life (months)
+        min_periods: minimum number of observations
         
     Returns:
-        权重表（与ic_table同索引）
+        weight table (same index as ic_table)
     """
     ewm_mean = ic_table.ewm(halflife=halflife, min_periods=min_periods).mean()
     ewm_std = ic_table.ewm(halflife=halflife, min_periods=min_periods).std()
@@ -146,16 +147,17 @@ def ewma_icir_weights(ic_table: pd.DataFrame, halflife: int = 6,
 def orthogonalize_factors(factor_panels: Dict[str, pd.DataFrame], order: List[str],
                           rebalance_dates: List[pd.Timestamp]) -> Dict[str, pd.DataFrame]:
     """
-    逐层正交化：按order顺序，每个因子对前面已正交化的因子做截面回归取残差，
-    消除因子间共线（如size吃掉价值/质量的信息），残差再标准化
+    Sequential orthogonalization: following `order`, each factor is regressed on the
+    previously orthogonalized factors and the residual is taken, removing collinearity
+    (e.g. size absorbing value/quality information); residuals are re-normalized.
     
     Args:
-        factor_panels: {因子名: 日频因子宽表}（原始值）
-        order: 正交化顺序（先保留的因子在前，如size优先）
-        rebalance_dates: 调仓日期列表
+        factor_panels: {factor name: daily factor wide table} (raw values)
+        order: orthogonalization order (factors to preserve first come earlier, e.g. size)
+        rebalance_dates: list of rebalance dates
         
     Returns:
-        正交化后的因子面板dict（日频，调仓日之间前向填充）
+        dict of orthogonalized factor panels (daily, forward-filled between rebalance dates)
     """
     rb_index = pd.DatetimeIndex(rebalance_dates)
     cross_sections = {}
@@ -184,7 +186,8 @@ def orthogonalize_factors(factor_panels: Dict[str, pd.DataFrame], order: List[st
             rows.append(preprocess_cross_section(resid))
         ortho_tables[name] = pd.DataFrame(rows, index=rb_index)
     
-    # 调仓日截面 + 前向填充回日频，保持与dynamic_weight_scores接口一致
+    # Rebalance-date cross sections + forward fill back to daily,
+    # keeping the interface consistent with dynamic_weight_scores
     result = {}
     for name in order:
         daily_index = factor_panels[name].index.union(rb_index)
@@ -197,16 +200,17 @@ def factor_long_short_returns(factor_panels: Dict[str, pd.DataFrame],
                               rebalance_dates: List[pd.Timestamp],
                               quantile: float = 0.2) -> pd.DataFrame:
     """
-    构造各因子的多空组合月度收益：每期按因子值取前quantile做多、后quantile做空
+    Build monthly long-short returns for each factor: each period, long the top
+    `quantile` by factor value and short the bottom `quantile`.
     
     Args:
-        factor_panels: {因子名: 日频因子宽表}
-        period_ret: 区间收益宽表（index=调仓日[:-1]）
-        rebalance_dates: 调仓日期列表
-        quantile: 多空两端各自的分位比例
+        factor_panels: {factor name: daily factor wide table}
+        period_ret: period return wide table (index=rebalance dates[:-1])
+        rebalance_dates: list of rebalance dates
+        quantile: fraction on each side of the long-short split
         
     Returns:
-        多空收益表（index=period_ret.index, columns=因子名）
+        long-short return table (index=period_ret.index, columns=factor name)
     """
     rb_index = pd.DatetimeIndex(rebalance_dates)
     ls_records = {}
@@ -226,17 +230,20 @@ def factor_long_short_returns(factor_panels: Dict[str, pd.DataFrame],
 def rolling_mv_weights(ls_returns: pd.DataFrame, window: int = 36,
                        min_periods: int = 24) -> pd.DataFrame:
     """
-    均值-方差加权（因子收益版）：滚动窗口内用因子多空组合的真实收益，
-    Ledoit-Wolf收缩协方差，求解最大化夏普的权重（权重和为1, 非负）
-    权重表与IC表用法一致：t行的权重由t及之前的收益算出，应用于下一调仓日
+    Mean-variance weighting (factor-return version): within a rolling window, use the
+    realized returns of factor long-short portfolios with a Ledoit-Wolf shrunk covariance,
+    and solve for Sharpe-maximizing weights (sum to 1, non-negative).
+    Usage is consistent with IC tables: row t is computed from returns up to and including t,
+    and is applied at the next rebalance date.
     
     Args:
-        ls_returns: 因子多空收益表
-        window: 滚动窗口（月）
-        min_periods: 最少观测期数
+        ls_returns: factor long-short return table
+        window: rolling window (months)
+        min_periods: minimum number of observations
         
     Returns:
-        权重表；组合预期收益非正或求解失败的期为NaN（调用方回退等权）
+        weight table; NaN for periods with non-positive expected portfolio return or
+        failed solving (caller falls back to equal weight)
     """
     n = len(ls_returns.columns)
     records = []
@@ -260,7 +267,8 @@ def rolling_mv_weights(ls_returns: pd.DataFrame, window: int = 36,
                           bounds=[(0.0, 1.0)] * n,
                           constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}],
                           options={"maxiter": 200})
-        # 组合预期收益非正说明窗口内无可用alpha方向，回退等权
+        # Non-positive expected portfolio return means no usable alpha direction
+        # in the window; fall back to equal weight
         if result.success and mu @ result.x > 0:
             records.append(result.x)
         else:
@@ -273,24 +281,25 @@ def dynamic_weight_scores(factor_panels: Dict[str, pd.DataFrame], weights_df: pd
                           rebalance_dates: List[pd.Timestamp],
                           factor_names: List[str] = None) -> pd.DataFrame:
     """
-    按时点动态权重合成因子得分
-    调仓日T使用的权重仅来自T之前的IC信息（严格时点对齐）
+    Combine factor scores with time-varying weights.
+    Weights applied at rebalance date T come only from IC information strictly before T
+    (strict point-in-time alignment).
     
     Args:
-        factor_panels: {因子名: 日频因子宽表}（原始值）
-        weights_df: 权重表（index=IC对应调仓日, columns=因子名）
-        rebalance_dates: 全部调仓日期
-        factor_names: 因子名列表（默认取weights_df的列）
+        factor_panels: {factor name: daily factor wide table} (raw values)
+        weights_df: weight table (index=rebalance dates for IC, columns=factor name)
+        rebalance_dates: all rebalance dates
+        factor_names: list of factor names (defaults to weights_df columns)
         
     Returns:
-        合成得分宽表（index=调仓日, columns=股票代码）
+        combined score wide table (index=rebalance date, columns=stock code)
     """
     factor_names = factor_names or list(weights_df.columns)
     scores = None
     n_factors = len(factor_names)
     equal_w = np.ones(n_factors) / n_factors
     
-    # 预计算各因子在调仓日的标准化截面
+    # Precompute normalized cross sections at rebalance dates for each factor
     normalized = {}
     for name in factor_names:
         panel = factor_panels[name]
@@ -299,7 +308,7 @@ def dynamic_weight_scores(factor_panels: Dict[str, pd.DataFrame], weights_df: pd
             preprocess_cross_section, axis=1)
     
     for k, t in enumerate(rebalance_dates):
-        # 仅使用严格早于t的IC信息对应的权重
+        # use only weights derived from IC information strictly before t
         past = weights_df.loc[weights_df.index < t]
         if not past.empty and past.iloc[-1].notna().any():
             w = past.iloc[-1].fillna(0).values
@@ -317,9 +326,10 @@ def dynamic_weight_scores(factor_panels: Dict[str, pd.DataFrame], weights_df: pd
 
 class MLWalkForwardScorer:
     """
-    机器学习walk-forward打分器
-    滚动训练: 用T之前train_window个月的(因子截面 -> 下期收益)样本训练模型，
-    预测T期截面的下期收益作为得分
+    Machine-learning walk-forward scorer.
+    Rolling training: train a model on (factor cross-section -> next-period return)
+    samples from the train_window months before T, then predict the next-period
+    return of the cross section at T as the score.
     """
     
     def __init__(self, model_type: str = "ridge", train_window: int = 36,
@@ -327,12 +337,13 @@ class MLWalkForwardScorer:
                  expanding: bool = False, clip_targets: bool = True):
         """
         Args:
-            model_type: 'ridge' 或 'gbdt'
-            train_window: 训练窗口（月），expanding=True时忽略
-            min_train_periods: 最少训练期数
-            factor_names: 参与建模的因子名
-            expanding: 使用扩展窗口（全部历史）而非滚动窗口
-            clip_targets: 训练目标按截面1%/99%分位缩尾，降低重尾影响
+            model_type: 'ridge' or 'gbdt'
+            train_window: training window (months), ignored when expanding=True
+            min_train_periods: minimum number of training periods
+            factor_names: factor names used as model features
+            expanding: use an expanding window (full history) instead of rolling
+            clip_targets: winsorize training targets at the 1%/99% cross-section
+                          quantiles to reduce heavy-tail impact
         """
         self.model_type = model_type
         self.train_window = train_window
@@ -350,11 +361,11 @@ class MLWalkForwardScorer:
                 min_samples_leaf=50, l2_regularization=1.0,
                 early_stopping=False, random_state=42
             )
-        raise ValueError(f"未知模型类型: {self.model_type}")
+        raise ValueError(f"Unknown model type: {self.model_type}")
     
     def _build_samples(self, factor_panels: Dict[str, pd.DataFrame],
                        period_ret: pd.DataFrame) -> pd.DataFrame:
-        """构建训练样本长表: 每行 = (调仓日, 股票, 各因子z值, 下期收益)"""
+        """Build the training sample long table: each row = (rebalance date, stock, factor z-values, next-period return)"""
         factor_names = self.factor_names
         frames = []
         
@@ -371,7 +382,7 @@ class MLWalkForwardScorer:
             x["stock_code"] = x.index
             y = period_ret.loc[t].reindex(x.index)
             if self.clip_targets:
-                # 截面1%/99%分位缩尾，降低重尾收益对回归的干扰
+                # clip at cross-section 1%/99% quantiles to reduce heavy-tail interference
                 y = y.clip(lower=y.quantile(0.01), upper=y.quantile(0.99))
             x["y"] = y
             frames.append(x)
@@ -382,17 +393,19 @@ class MLWalkForwardScorer:
                     period_ret: pd.DataFrame,
                     rebalance_dates: List[pd.Timestamp]) -> pd.DataFrame:
         """
-        walk-forward预测，输出各调仓日截面得分
+        Walk-forward prediction, outputting cross-section scores for each rebalance date
         
         Returns:
-            得分宽表（index=调仓日, columns=股票代码），训练期不足的日期为NaN
+            score wide table (index=rebalance date, columns=stock code);
+            dates with insufficient training history are NaN
         """
         self.factor_names = self.factor_names or list(factor_panels.keys())
         samples = self._build_samples(factor_panels, period_ret)
         
         scores_rows = []
         for k, t in enumerate(rebalance_dates):
-            # 训练集: 严格早于t的历史期（扩展窗口用全部历史，滚动窗口限train_window）
+            # Training set: history strictly before t (expanding uses all history,
+            # rolling limits to train_window)
             if self.expanding:
                 train = samples[samples["period_date"] < t]
             else:
@@ -410,14 +423,14 @@ class MLWalkForwardScorer:
             
             model = self._new_model()
             if self.model_type == "ridge":
-                # Ridge不支持NaN，填充0（zscore后0即截面均值）
+                # Ridge does not support NaN; fill with 0 (0 is the cross-section mean after zscore)
                 x_fit = np.nan_to_num(x_train[valid], nan=0.0)
                 model.fit(x_fit, y_train[valid])
             else:
-                # 直方图GBDT原生支持NaN
+                # histogram GBDT handles NaN natively
                 model.fit(x_train[valid], y_train[valid])
             
-            # T期截面预测
+            # predict the cross section at T
             x_t = pd.DataFrame({
                 name: preprocess_cross_section(factor_panels[name].loc[t])
                 if t in factor_panels[name].index else np.nan

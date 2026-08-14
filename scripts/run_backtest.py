@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-回测运行脚本
-一键运行基本面多因子月度轮动回测
+Backtest runner script
+One-click run of the fundamental multi-factor monthly rotation backtest
 """
 import sys
 import os
@@ -27,43 +27,43 @@ from src.utils.helpers import load_config, ensure_dir, performance_metrics
 
 def compute_factor_panels(config: Dict, panel: dict, financial: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """
-    计算各因子日频宽表
+    Compute daily wide tables for all factors
     
     Args:
-        config: 配置字典
-        panel: 估值宽表字典 (close/ret/pe_ttm/pb/total_mv)
-        financial: 财务长表
+        config: config dict
+        panel: dict of valuation wide tables (close/ret/pe_ttm/pb/total_mv)
+        financial: financial long table
         
     Returns:
-        {因子名: 因子宽表}
+        {factor name: factor wide table}
     """
     factor_config = config["factor"]
     trading_dates = panel["ret"].index
     
-    print("计算 EP 因子...")
+    print("Computing EP factor...")
     ep = EPFactor().compute(panel["pe_ttm"])
-    print("计算 BP 因子...")
+    print("Computing BP factor...")
     bp = BPFactor().compute(panel["pb"])
-    print("计算 Size 因子...")
+    print("Computing Size factor...")
     size = SizeFactor().compute(panel["total_mv"])
-    print("计算 Momentum 因子...")
+    print("Computing Momentum factor...")
     momentum = MomentumFactor(
         long_window=factor_config["momentum_long_window"],
         skip_window=factor_config["momentum_skip_window"]
     ).compute(panel["ret"])
-    print("计算 ROE(TTM) 因子...")
+    print("Computing ROE(TTM) factor...")
     roe = ROETTMFactor(
         disclosure_lag=factor_config["disclosure_lag"]
     ).compute(financial, trading_dates)
     
-    return {"ep": ep, "bp": bp, "roe": roe, "size": size, "momentum": momentum}
+    return {"ep": ep, "bp": bp, "size": size, "momentum": momentum, "roe": roe}
 
 
 def plot_results(analysis: Dict, plot_dir: str):
-    """绘制并保存回测图表"""
+    """Generate and save backtest plots"""
     ensure_dir(plot_dir)
     
-    # 1. 组合 vs 基准净值曲线
+    # 1. portfolio vs benchmark NAV curves
     fig, ax = plt.subplots(figsize=(12, 6))
     analysis["portfolio_nav"].plot(ax=ax, label="Multi-Factor Portfolio")
     analysis["benchmark_nav"].plot(ax=ax, label="CSI 300 Benchmark")
@@ -76,7 +76,7 @@ def plot_results(analysis: Dict, plot_dir: str):
     fig.savefig(os.path.join(plot_dir, "nav_curve.png"), dpi=150)
     plt.close(fig)
     
-    # 2. 分层回测净值曲线
+    # 2. quantile-group NAV curves
     fig, ax = plt.subplots(figsize=(12, 6))
     for g, nav in analysis["group_navs"].items():
         label = f"{g} (top)" if g == "group_1" else (
@@ -91,7 +91,7 @@ def plot_results(analysis: Dict, plot_dir: str):
     fig.savefig(os.path.join(plot_dir, "quantile_nav.png"), dpi=150)
     plt.close(fig)
     
-    # 3. 因子月度IC柱状图
+    # 3. monthly factor IC bar charts
     ic_table = analysis["ic_table"]
     fig, axes = plt.subplots(1, len(ic_table.columns), figsize=(4 * len(ic_table.columns), 4),
                              sharey=True)
@@ -107,7 +107,7 @@ def plot_results(analysis: Dict, plot_dir: str):
     fig.savefig(os.path.join(plot_dir, "factor_ic_monthly.png"), dpi=150)
     plt.close(fig)
     
-    # 4. 因子累计IC曲线
+    # 4. cumulative factor IC curves
     fig, ax = plt.subplots(figsize=(12, 6))
     ic_table.cumsum().plot(ax=ax)
     ax.set_title("Cumulative Rank IC by Factor")
@@ -119,29 +119,29 @@ def plot_results(analysis: Dict, plot_dir: str):
     fig.savefig(os.path.join(plot_dir, "factor_ic_cumsum.png"), dpi=150)
     plt.close(fig)
     
-    print(f"\n图表已保存至: {plot_dir}")
+    print(f"\nPlots saved to: {plot_dir}")
 
 
 def main():
-    """主函数"""
-    print("基本面多因子回测系统")
+    """Main function"""
+    print("Fundamental Multi-Factor Backtest System")
     print("=" * 60)
     
-    # 加载配置
+    # load config
     config = load_config()
     data_config = config["data"]
     results_config = config["results"]
     
-    print("配置加载完成")
-    print(f"  股票池: {data_config['universe']}")
-    print(f"  回测范围: {data_config['start_date']} ~ {data_config['end_date']}")
-    print(f"  因子: {config['factor']['name']}")
-    print(f"  调仓频率: {config['backtest']['rebalance_freq']}")
+    print("Config loaded")
+    print(f"  Universe: {data_config['universe']}")
+    print(f"  Backtest range: {data_config['start_date']} ~ {data_config['end_date']}")
+    print(f"  Factor: {config['factor']['name']}")
+    print(f"  Rebalance frequency: {config['backtest']['rebalance_freq']}")
     print()
     
-    # ---------------- 数据准备 ----------------
+    # ---------------- data preparation ----------------
     print("=" * 60)
-    print("数据准备阶段")
+    print("Data Preparation")
     print("=" * 60)
     
     loader = DataLoader(
@@ -154,68 +154,68 @@ def main():
         end_date=data_config["end_date"]
     )
     valuation, financial = data["valuation"], data["financial"]
-    print(f"估值数据: {valuation.shape}, 财务数据: {financial.shape}")
+    print(f"Valuation data: {valuation.shape}, financial data: {financial.shape}")
     
     panel = loader.prepare_panel_data(valuation)
-    print(f"面板数据: {panel['ret'].shape[0]} 个交易日, {panel['ret'].shape[1]} 只股票")
+    print(f"Panel data: {panel['ret'].shape[0]} trading days, {panel['ret'].shape[1]} stocks")
     
-    # 基准指数
+    # benchmark index
     bench_path = os.path.join(data_config["raw_dir"],
                               f"benchmark_{data_config['benchmark']}.parquet")
     benchmark = pd.read_parquet(bench_path)
     
-    # ---------------- 因子计算 ----------------
+    # ---------------- factor computation ----------------
     print("\n" + "=" * 60)
-    print("因子计算阶段")
+    print("Factor Computation")
     print("=" * 60)
     
     factor_panels = compute_factor_panels(config, panel, financial)
     
-    # 调仓日（每月最后一个交易日）
+    # rebalance dates (last trading day of each month)
     engine = MultiFactorEngine(config)
     rebalance_dates = engine.get_rebalance_dates(
         panel["ret"].index,
         start_date=data_config["start_date"],
         end_date=data_config["end_date"]
     )
-    print(f"\n调仓日数量: {len(rebalance_dates)} "
+    print(f"\nNumber of rebalance dates: {len(rebalance_dates)} "
           f"({pd.Timestamp(rebalance_dates[0]).date()} ~ {pd.Timestamp(rebalance_dates[-1]).date()})")
     
-    # 多因子合成
+    # multi-factor combination
     combiner = MultiFactorCombiner(config["factor"]["weights"])
     scores = combiner.combine(factor_panels, rebalance_dates)
-    print(f"合成得分矩阵: {scores.shape}")
+    print(f"Combined score matrix: {scores.shape}")
     
-    # ---------------- 回测阶段 ----------------
+    # ---------------- backtest ----------------
     print("\n" + "=" * 60)
-    print("回测阶段")
+    print("Backtest")
     print("=" * 60)
     
     period_ret = engine.compute_period_returns(panel["ret"], rebalance_dates)
     
-    # Top-N组合回测
+    # Top-N portfolio backtest
     portfolio = engine.run_portfolio(scores, period_ret, rebalance_dates)
     portfolio_nav = portfolio["nav"]
-    print(f"\n多头组合期末净值: {portfolio_nav.iloc[-1]:.4f}")
+    print(f"\nLong portfolio final NAV: {portfolio_nav.iloc[-1]:.4f}")
     
-    # 分层回测
+    # quantile-group backtest
     group_navs = engine.run_groups(scores, period_ret, rebalance_dates)
     
-    # 基准净值（对齐调仓日）
+    # benchmark NAV (aligned to rebalance dates)
     bench_close = benchmark["close"].reindex(
         benchmark.index.union(pd.DatetimeIndex(rebalance_dates))
     ).ffill().loc[rebalance_dates]
     benchmark_nav = bench_close / bench_close.iloc[0]
     
-    # IC分析
-    print("\n计算因子Rank IC...")
+    # IC analysis
+    print("\nComputing factor Rank IC...")
     ic_table = compute_rank_ic(factor_panels, period_ret, rebalance_dates)
     ic_stat = ic_summary(ic_table)
     print(ic_stat.round(4))
     
-    # ---------------- 结果输出 ----------------
+    # ---------------- output ----------------
     print("\n" + "=" * 60)
-    print("结果输出阶段")
+    print("Results Output")
     print("=" * 60)
     
     analysis = {
@@ -234,11 +234,11 @@ def main():
         "turnover_avg": float(portfolio["turnover"].mean()),
     }
     
-    # 文本报告
+    # text report
     ensure_dir(results_config["report_dir"])
     generate_report(analysis, results_config["report_dir"])
     
-    # YAML结果（仅标量指标）
+    # YAML results (scalar metrics only)
     yaml_results = {
         "date_range": analysis["date_range"],
         "portfolio_metrics": analysis["portfolio_metrics"],
@@ -250,12 +250,12 @@ def main():
     results_path = os.path.join(results_config["report_dir"], "analysis_results.yaml")
     with open(results_path, "w", encoding="utf-8") as f:
         yaml.dump(yaml_results, f, allow_unicode=True, default_flow_style=False)
-    print(f"\n分析结果已保存至: {results_path}")
+    print(f"\nAnalysis results saved to: {results_path}")
     
-    # 图表
+    # plots
     plot_results(analysis, results_config["plot_dir"])
     
-    print("\n回测完成!")
+    print("\nBacktest complete!")
 
 
 if __name__ == "__main__":

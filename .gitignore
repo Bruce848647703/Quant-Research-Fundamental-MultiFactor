@@ -29,6 +29,10 @@ data/processed/*.csv
 # results/reports/*
 # results/plots/*
 
+# Timestamped reports accumulate; keep only *_latest files
+results/reports/backtest_report_2*.txt
+results/reports/weight_optimization_report_2*.txt
+
 # Jupyter
 .ipynb_checkpoints/
 

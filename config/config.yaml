@@ -1,78 +1,80 @@
-# Quant-Research-Fundamental-MultiFactor 全局配置
+# Quant-Research-Fundamental-MultiFactor global configuration
 
-# 数据配置
+# Data configuration
 data:
-  # 股票池
-  universe: "hs300"  # 沪深300成分股
-  # 回测时间范围（估值数据自2018年起可得，2018-2019作为动量因子预热窗口）
+  # Stock universe
+  universe: "hs300"  # CSI 300 constituents
+  # Backtest period (valuation data available from 2018; 2018-2019 serves as
+  # the warm-up window for the momentum factor)
   start_date: "20200101"
   end_date: "20260801"
-  # 基准指数
+  # Benchmark index
   benchmark: "sh000300"
-  # 数据存放路径
+  # Data storage paths
   raw_dir: "data/raw"
   processed_dir: "data/processed"
 
-# 因子配置
+# Factor configuration
 factor:
   name: "fundamental_multi_factor"
-  # 各因子合成权重（等权）
+  # Combining weights for each factor (equal weight)
   weights:
-    ep: 0.20         # 盈利收益率 1/PE(TTM)
-    bp: 0.20         # 账面市值比 1/PB
-    roe: 0.20        # ROE(TTM) 盈利能力
-    size: 0.20       # 小市值 -ln(总市值)
-    momentum: 0.20   # 12-1月动量
-  # 动量因子参数（交易日）
+    ep: 0.20         # Earnings yield 1/PE(TTM)
+    bp: 0.20         # Book-to-market ratio 1/PB
+    roe: 0.20        # ROE(TTM) profitability
+    size: 0.20       # Small cap -ln(total market cap)
+    momentum: 0.20   # 12-1 month momentum
+  # Momentum factor parameters (trading days)
   momentum_long_window: 252
   momentum_skip_window: 21
-  # 财报披露滞后（自然日，按报告季度区分，用于ROE时点对齐）
+  # Financial report disclosure lag (calendar days, per report quarter,
+  # used for point-in-time alignment of ROE)
   disclosure_lag:
-    q1: 30    # 一季报: 3/31 -> 4/30
-    q2: 62    # 半年报: 6/30 -> 8/31
-    q3: 31    # 三季报: 9/30 -> 10/31
-    q4: 121   # 年报: 12/31 -> 4/30
+    q1: 30    # Q1 report: 3/31 -> 4/30
+    q2: 62    # Semi-annual report: 6/30 -> 8/31
+    q3: 31    # Q3 report: 9/30 -> 10/31
+    q4: 121   # Annual report: 12/31 -> 4/30
 
-# 回测配置
+# Backtest configuration
 backtest:
-  # 初始资金
+  # Initial capital
   initial_cash: 1000000
-  # 手续费率（万分之三）
+  # Commission rate (0.03%)
   commission: 0.0003
-  # 印花税率（千分之一，仅卖出）
+  # Stamp tax rate (0.1%, sell side only)
   stamp_tax: 0.001
-  # 滑点（千分之一，单边）
+  # Slippage (0.1%, one way)
   slippage: 0.001
-  # 调仓频率
+  # Rebalance frequency
   rebalance_freq: "monthly"
-  # 分组数量（分层回测）
+  # Number of groups (quantile backtest)
   num_groups: 5
-  # 组合持仓数量（取得分最高的前N只）
+  # Number of portfolio holdings (top N by combined score)
   top_n: 30
 
-# 结果输出
+# Result output
 results:
   report_dir: "results/reports"
   plot_dir: "results/plots"
 
-# 权重优化配置（scripts/run_weight_optimization.py）
+# Weight optimization configuration (scripts/run_weight_optimization.py)
 weight_optimization:
-  # ICIR动态加权的滚动窗口（月）
+  # Rolling window for dynamic ICIR weighting (months)
   icir_window: 12
-  # 最大化组合ICIR的滚动窗口（月）
+  # Rolling window for portfolio ICIR maximization (months)
   max_icir_window: 36
   max_icir_min_periods: 24
-  # 机器学习walk-forward训练窗口（月）
+  # ML walk-forward training window (months)
   ml_train_window: 36
   ml_min_train_periods: 24
-  # EWMA-IC加权的半衰期（月）
+  # Half-life for EWMA-IC weighting (months)
   ewma_halflife: 6
-  # 正交化顺序（先保留的因子在前）
+  # Orthogonalization order (factors to preserve first come earlier)
   ortho_order: ["size", "ep", "bp", "roe", "momentum"]
-  # 均值-方差加权：因子多空收益的滚动窗口（月）
+  # Mean-variance weighting: rolling window of factor long-short returns (months)
   mv_window: 36
   mv_min_periods: 24
-  # ML集成向等权得分的收缩比例（0=纯ML, 1=纯等权）
+  # Shrinkage ratio of the ML ensemble toward the equal-weight score (0=pure ML, 1=pure equal weight)
   ml_shrinkage: 0.3
-  # 逆波动率配权的波动率估计窗口（交易日）
+  # Volatility estimation window for inverse-volatility weighting (trading days)
   inv_vol_window: 63
