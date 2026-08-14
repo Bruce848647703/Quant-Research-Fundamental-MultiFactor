@@ -42,7 +42,7 @@ class MultiFactorEngine:
         
         series = pd.Series(dates, index=dates)
         month_end = series.groupby([dates.year, dates.month]).max()
-        return list(month_end.values)
+        return [pd.Timestamp(d) for d in month_end.values]
     
     def compute_period_returns(self, ret_wide: pd.DataFrame,
                                rebalance_dates: List[pd.Timestamp]) -> pd.DataFrame:
