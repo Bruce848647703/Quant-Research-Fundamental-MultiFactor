@@ -65,3 +65,14 @@ weight_optimization:
   # 机器学习walk-forward训练窗口（月）
   ml_train_window: 36
   ml_min_train_periods: 24
+  # EWMA-IC加权的半衰期（月）
+  ewma_halflife: 6
+  # 正交化顺序（先保留的因子在前）
+  ortho_order: ["size", "ep", "bp", "roe", "momentum"]
+  # 均值-方差加权：因子多空收益的滚动窗口（月）
+  mv_window: 36
+  mv_min_periods: 24
+  # ML集成向等权得分的收缩比例（0=纯ML, 1=纯等权）
+  ml_shrinkage: 0.3
+  # 逆波动率配权的波动率估计窗口（交易日）
+  inv_vol_window: 63

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-权重优化对比脚本
-对比 等权(基准) / ICIR动态加权 / 最大化组合ICIR / Ridge walk-forward / GBDT walk-forward
+权重优化对比脚本（v2）
+v1方法: 等权(基准) / ICIR动态加权 / 最大化组合ICIR / Ridge walk-forward / GBDT walk-forward
+v2改进: EWMA-IC加权 / 正交化+EWMA / 均值-方差(因子多空收益) /
+        ML集成(扩展窗口+向等权收缩) / 逆波动率组内配权
 全部采用walk-forward方式，仅使用时点之前的信息
 """
 import sys
@@ -19,9 +21,11 @@ from datetime import datetime
 
 from src.data.data_loader import DataLoader
 from src.factors.weight_optimizer import (
-    rolling_icir_weights, rolling_max_icir_weights,
+    rolling_icir_weights, rolling_max_icir_weights, ewma_icir_weights,
+    orthogonalize_factors, factor_long_short_returns, rolling_mv_weights,
     dynamic_weight_scores, MLWalkForwardScorer
 )
+from src.factors.base import preprocess_cross_section
 from src.backtest.engine import MultiFactorEngine
 from src.backtest.analyzers import compute_rank_ic
 from src.utils.helpers import load_config, ensure_dir, performance_metrics
@@ -102,19 +106,83 @@ def main():
     )
     scores_gbdt = gbdt.fit_predict(factor_panels, period_ret, rebalance_dates)
     
+    # ---------------- v2 改进方法 ----------------
+    
+    # 6. EWMA-IC加权（指数衰减，近期信号权重更高）
+    ewma_w = ewma_icir_weights(
+        ic_table, halflife=wo_config.get("ewma_halflife", 6))
+    scores_ewma = dynamic_weight_scores(factor_panels, ewma_w,
+                                        rebalance_dates, factor_names)
+    
+    # 7. 正交化后再EWMA加权（消除size共线）
+    print("因子正交化...")
+    ortho_order = wo_config.get("ortho_order", factor_names)
+    ortho_panels = orthogonalize_factors(factor_panels, ortho_order, rebalance_dates)
+    ic_table_ortho = compute_rank_ic(ortho_panels, period_ret, rebalance_dates)
+    ewma_ortho_w = ewma_icir_weights(
+        ic_table_ortho, halflife=wo_config.get("ewma_halflife", 6))
+    scores_ortho = dynamic_weight_scores(ortho_panels, ewma_ortho_w,
+                                         rebalance_dates, ortho_order)
+    
+    # 8. 均值-方差加权（因子多空组合真实收益 + Ledoit-Wolf收缩协方差）
+    print("构造因子多空收益...")
+    ls_returns = factor_long_short_returns(factor_panels, period_ret, rebalance_dates)
+    mv_w = rolling_mv_weights(
+        ls_returns, window=wo_config.get("mv_window", 36),
+        min_periods=wo_config.get("mv_min_periods", 24))
+    scores_mv = dynamic_weight_scores(factor_panels, mv_w,
+                                      rebalance_dates, factor_names)
+    
+    # 9. ML集成：扩展窗口Ridge+GBDT，截面标准化后平均，再向等权得分收缩降方差
+    print("训练 ML集成（扩展窗口 Ridge + GBDT）...")
+    ridge_exp = MLWalkForwardScorer(
+        model_type="ridge", expanding=True, clip_targets=True,
+        min_train_periods=wo_config.get("ml_min_train_periods", 24),
+        factor_names=factor_names)
+    gbdt_exp = MLWalkForwardScorer(
+        model_type="gbdt", expanding=True, clip_targets=True,
+        min_train_periods=wo_config.get("ml_min_train_periods", 24),
+        factor_names=factor_names)
+    pred_ridge = ridge_exp.fit_predict(factor_panels, period_ret, rebalance_dates)
+    pred_gbdt = gbdt_exp.fit_predict(factor_panels, period_ret, rebalance_dates)
+    
+    shrinkage = wo_config.get("ml_shrinkage", 0.3)
+    scores_ensemble = []
+    for t in pred_ridge.index:
+        r_z = preprocess_cross_section(pred_ridge.loc[t])
+        g_z = preprocess_cross_section(pred_gbdt.loc[t])
+        ml_z = (r_z + g_z) / 2
+        if ml_z.notna().any():
+            eq_z = preprocess_cross_section(scores_equal.loc[t])
+            row = (1 - shrinkage) * ml_z + shrinkage * eq_z
+        else:
+            row = ml_z
+        scores_ensemble.append(pd.DataFrame([row], index=[t]))
+    scores_ensemble = pd.concat(scores_ensemble)
+    
+    # 10. 逆波动率组内配权（分别叠加在等权与ML集成上）
+    vol_panel = panel["ret"].rolling(wo_config.get("inv_vol_window", 63)).std()
+    
     # ---------------- 回测对比 ----------------
     print("\n运行回测...")
     methods = {
-        "等权(基准)": scores_equal,
-        "ICIR动态加权": scores_icir,
-        "最大化组合ICIR": scores_maxicir,
-        "Ridge walk-forward": scores_ridge,
-        "GBDT walk-forward": scores_gbdt,
+        "等权(基准)": (scores_equal, None),
+        "ICIR动态加权": (scores_icir, None),
+        "最大化组合ICIR": (scores_maxicir, None),
+        "Ridge walk-forward": (scores_ridge, None),
+        "GBDT walk-forward": (scores_gbdt, None),
+        "EWMA-IC加权": (scores_ewma, None),
+        "正交化+EWMA": (scores_ortho, None),
+        "均值-方差加权": (scores_mv, None),
+        "ML集成(收缩)": (scores_ensemble, None),
+        "等权+逆波动率配权": (scores_equal, vol_panel),
+        "ML集成+逆波动率": (scores_ensemble, vol_panel),
     }
     
     navs, metrics = {}, {}
-    for name, scores in methods.items():
-        result = engine.run_portfolio(scores, period_ret, rebalance_dates)
+    for name, (scores, vol) in methods.items():
+        result = engine.run_portfolio(scores, period_ret, rebalance_dates,
+                                      inv_vol_panel=vol)
         navs[name] = result["nav"]
         m = performance_metrics(result["nav"], periods_per_year=12)
         m["avg_turnover"] = float(result["turnover"].mean())
@@ -122,7 +190,7 @@ def main():
     
     # 机器学习方法只统计训练期结束后的样本外表现
     ml_start = pd.Timestamp(rebalance_dates[wo_config.get("ml_min_train_periods", 24)])
-    for name in ["Ridge walk-forward", "GBDT walk-forward"]:
+    for name in ["Ridge walk-forward", "GBDT walk-forward", "ML集成(收缩)", "ML集成+逆波动率"]:
         nav_oos = navs[name][navs[name].index >= ml_start]
         if len(nav_oos) > 12:
             nav_oos = nav_oos / nav_oos.iloc[0]
@@ -171,8 +239,10 @@ def main():
         summary.round(4).to_string(),
         "",
         "说明:",
-        "- ICIR动态加权/最大化组合ICIR 仅使用调仓日之前的历史IC",
-        "- Ridge/GBDT 为walk-forward: 滚动训练窗口预测下期收益, 前期为训练期",
+        "- ICIR/EWMA/均值-方差/最大化ICIR 仅使用调仓日之前的历史IC/收益",
+        "- 正交化+EWMA: 因子先对size等前置因子回归取残差，消除共线后再EWMA加权",
+        "- Ridge/GBDT/ML集成 为walk-forward: ML集成用扩展窗口+向等权得分收缩",
+        "- 逆波动率配权: Top-N内按过去63日波动率倒数配权",
         "- oos_* 为机器学习方法训练期结束后的样本外指标",
         "=" * 60,
     ]
@@ -181,11 +251,13 @@ def main():
         f.write(report_text)
     print(f"\n报告已保存至: {report_path}")
     
-    # 权重序列样本（展示ICIR加权与最大化ICIR的最新权重）
+    # 权重序列样本（展示各统计方法的最新权重）
     weights_path = os.path.join(results_config["report_dir"], "optimized_weights_latest.csv")
     latest_weights = pd.DataFrame({
         "icir_weight": icir_w.dropna(how="all").iloc[-1],
+        "ewma_weight": ewma_w.dropna(how="all").iloc[-1],
         "max_icir_weight": maxicir_w.dropna(how="all").iloc[-1],
+        "mv_weight": mv_w.dropna(how="all").iloc[-1].reindex(factor_names),
         "equal_weight": 1.0 / len(factor_names),
     })
     latest_weights.to_csv(weights_path, encoding="utf-8-sig")

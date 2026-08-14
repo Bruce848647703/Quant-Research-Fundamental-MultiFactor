@@ -75,14 +75,17 @@ class MultiFactorEngine:
         return changed / max(len(old_holdings), 1)
     
     def run_portfolio(self, scores: pd.DataFrame, period_ret: pd.DataFrame,
-                      rebalance_dates: List[pd.Timestamp]) -> Dict:
+                      rebalance_dates: List[pd.Timestamp],
+                      inv_vol_panel: pd.DataFrame = None) -> Dict:
         """
-        Top-N等权组合回测
+        Top-N组合回测
         
         Args:
             scores: 合成得分宽表（index=调仓日, columns=股票代码）
             period_ret: 区间收益宽表
             rebalance_dates: 完整调仓日期列表（比period_ret多一个期末日期）
+            inv_vol_panel: 日频波动率宽表（可选），传入时组合内按逆波动率配权，
+                           否则等权
             
         Returns:
             结果字典: nav / holdings / turnover
@@ -92,6 +95,13 @@ class MultiFactorEngine:
         turnover_history = []
         
         old_holdings = set()
+        
+        # 波动率在调仓日采样并前向填充
+        vol_at_rb = None
+        if inv_vol_panel is not None:
+            rb_index = pd.DatetimeIndex(rebalance_dates)
+            vol_at_rb = inv_vol_panel.reindex(
+                inv_vol_panel.index.union(rb_index)).ffill()
         
         for t in period_ret.index:
             # 当期选股：得分最高的top_n只
@@ -111,7 +121,15 @@ class MultiFactorEngine:
             new_holdings = set(score_t.nlargest(n).index)
             
             turnover = self._turnover(old_holdings, new_holdings)
-            ret_t = period_ret.loc[t, list(new_holdings)].mean()
+            holding_list = list(new_holdings)
+            if vol_at_rb is not None:
+                # 逆波动率配权：权重 ∝ 1/近期波动率
+                vols = vol_at_rb.loc[t, holding_list].clip(lower=1e-4)
+                wts = (1.0 / vols)
+                wts = wts / wts.sum()
+                ret_t = (period_ret.loc[t, holding_list] * wts).sum()
+            else:
+                ret_t = period_ret.loc[t, holding_list].mean()
             cost = turnover * self.turnover_cost
             nav_values.append(nav_values[-1] * (1 + ret_t - cost))
             
