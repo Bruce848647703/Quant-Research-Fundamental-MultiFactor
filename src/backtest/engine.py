@@ -96,6 +96,17 @@ class MultiFactorEngine:
         for t in period_ret.index:
             # 当期选股：得分最高的top_n只
             score_t = scores.loc[t].dropna()
+            if score_t.empty:
+                # 得分不可用（如机器学习训练期不足）：沿用旧持仓，不产生交易成本
+                if old_holdings:
+                    ret_t = period_ret.loc[t, list(old_holdings)].mean()
+                    nav_values.append(nav_values[-1] * (1 + ret_t))
+                else:
+                    nav_values.append(nav_values[-1])
+                holdings_history.append(sorted(old_holdings))
+                turnover_history.append(0.0)
+                continue
+            
             n = min(self.top_n, len(score_t))
             new_holdings = set(score_t.nlargest(n).index)
             
@@ -138,6 +149,14 @@ class MultiFactorEngine:
         
         for t in period_ret.index:
             score_t = scores.loc[t].dropna()
+            if score_t.empty:
+                # 得分不可用：各组沿用旧持仓
+                for g in range(1, num_groups + 1):
+                    holdings = old_groups.get(g, set())
+                    ret_t = period_ret.loc[t, list(holdings)].mean() if holdings else 0.0
+                    group_navs[g].append(group_navs[g][-1] * (1 + ret_t))
+                continue
+            
             # 按得分排序后均分，第1组为得分最高组
             ranked = score_t.sort_values(ascending=False)
             group_lists = np.array_split(ranked.index.values, num_groups)

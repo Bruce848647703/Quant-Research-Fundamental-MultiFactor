@@ -71,6 +71,39 @@ A股量化研究项目 - **基本面多因子月度轮动策略**
 
 ![累计IC](results/plots/factor_ic_cumsum.png)
 
+## 因子权重优化
+
+除默认的等权合成外，项目实现了四类权重优化方法（全部 walk-forward，严格使用时点前信息）：
+
+| 方法 | 原理 |
+|------|------|
+| ICIR动态加权 | 权重 ∝ 滚动12个月ICIR（负值置零），自动降权失效因子 |
+| 最大化组合ICIR | 基于因子IC均值/协方差矩阵（带收缩）的约束优化 (scipy SLSQP) |
+| Ridge walk-forward | 滚动36个月训练岭回归，直接预测下期收益，系数≈自适应权重 |
+| GBDT walk-forward | 直方图梯度提升树(sklearn HistGradientBoosting)，捕捉非线性交互 |
+
+```bash
+python scripts/run_weight_optimization.py
+```
+
+### 对比结果（2020-01 ~ 2026-07，月度调仓 Top 30）
+
+| 方法 | 年化收益 | 夏普 | 最大回撤 | 年化波动 | 月换手 |
+|------|------|------|------|------|------|
+| 等权(基准) | 18.56% | **1.21** | **-10.83%** | **15.36%** | 12.9% |
+| ICIR动态加权 | 16.10% | 0.92 | -26.66% | 17.51% | 28.5% |
+| 最大化组合ICIR | 20.53% | 1.08 | -20.69% | 19.05% | 16.5% |
+| Ridge walk-forward | 20.43% | 0.78 | -28.02% | 26.31% | 15.3% |
+| GBDT walk-forward | **25.62%** | 0.98 | -30.81% | 26.08% | 27.6% |
+
+GBDT 样本外（训练期结束后）: 年化 38.77%, 夏普 1.26。
+
+![权重优化对比](results/plots/weight_optimization_nav.png)
+
+**结论**: 机器学习能显著提升绝对收益（GBDT样本外年化近39%），但波动和回撤接近翻倍；
+等权方案风险调整后效率（夏普/回撤）仍最稳。追求稳健用等权，追求弹性可尝试 GBDT，
+且应配合风险预算控制仓位。ICIR动态加权在本样本中表现不佳，说明短窗口IC动量信号噪声大。
+
 ## 项目结构
 
 ```
@@ -90,10 +123,11 @@ Quant-Research-Fundamental-MultiFactor/
 │   ├── data/data_loader.py     # 数据获取与预处理
 │   ├── factors/base.py         # 去极值/标准化
 │   ├── factors/fundamental.py  # EP/BP/ROE/Size/Momentum 五因子
+│   ├── factors/weight_optimizer.py  # 权重优化(ICIR/约束优化/ML walk-forward)
 │   ├── backtest/engine.py      # 月度轮动回测引擎
 │   ├── backtest/analyzers.py   # IC分析与报告生成
 │   └── utils/helpers.py        # 工具函数
-├── tests/test_factors.py       # 因子单元测试
+├── tests/                      # 单元测试(因子+权重优化)
 ├── requirements.txt
 └── setup.py
 ```
@@ -110,7 +144,13 @@ python scripts/fetch_data.py
 # 2. 运行回测（产出报告、图表与指标）
 python scripts/run_backtest.py
 
-# 3. 运行单元测试
+# 3. 权重优化方法对比（ICIR加权/约束优化/ML walk-forward）
+python scripts/run_weight_optimization.py
+
+# 4. 输出当前应持仓组合
+python scripts/show_holdings.py
+
+# 5. 运行单元测试
 pytest tests/ -v
 ```
 

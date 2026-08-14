@@ -54,3 +54,14 @@ backtest:
 results:
   report_dir: "results/reports"
   plot_dir: "results/plots"
+
+# 权重优化配置（scripts/run_weight_optimization.py）
+weight_optimization:
+  # ICIR动态加权的滚动窗口（月）
+  icir_window: 12
+  # 最大化组合ICIR的滚动窗口（月）
+  max_icir_window: 36
+  max_icir_min_periods: 24
+  # 机器学习walk-forward训练窗口（月）
+  ml_train_window: 36
+  ml_min_train_periods: 24
